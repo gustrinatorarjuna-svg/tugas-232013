@@ -26,7 +26,7 @@ $db_host = getenv('MYSQLHOST')     ?: 'mysql.railway.internal';
 $db_name = getenv('MYSQLDATABASE') ?: 'railway';
 $db_port = (int)(getenv('MYSQLPORT')     ?: 3306);
 $db_user = getenv('MYSQLUSER')     ?: 'root';
-$db_pass = getenv('MYSQLPASSWORD') ?: 'UvaNYIKqGkBQOfswNzGiRvebOsiiNhJJ';
+$db_pass = getenv('MYSQLPASSWORD') ?: 'hITOWEbxOZmYvNiRUxneBBWfMXfOUkvp';
 
 // !! Jika PHP TIDAK di Railway (misal Koyeb, Render, dll),
 // ganti ke public host di bawah ini:
