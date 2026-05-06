@@ -1,0 +1,6 @@
+                                                                                                                                                                                                                                                                                                                                        # Tambah CORS hanya untuk file statis (gambar & video), bukan PHP
+<FilesMatch "\.(jpg|jpeg|png|gif|webp|mp4|webm|avi|mov|mkv)$">
+    <IfModule mod_headers.c>
+        Header always set Access-Control-Allow-Origin "*"
+    </IfModule>
+</FilesMatch>
