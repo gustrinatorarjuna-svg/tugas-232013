@@ -58,7 +58,7 @@ function uploadToR2(string $localPath, string $r2Key, string $contentType): bool
         exit();
     }
 
-    $region      = 'auto';
+    $region      = 'eu';
     $service     = 's3';
     $host        = "{$r2AccountId}.r2.cloudflarestorage.com";
     $amzDate     = gmdate('Ymd\THis\Z');
@@ -116,7 +116,7 @@ function uploadToR2(string $localPath, string $r2Key, string $contentType): bool
 function deleteFromR2(string $r2Key): void {
     global $r2AccessKey, $r2SecretKey, $r2BucketName, $r2AccountId, $r2Endpoint;
 
-    $region      = 'auto';
+    $region      = 'eu';
     $service     = 's3';
     $host        = "{$r2AccountId}.r2.cloudflarestorage.com";
     $amzDate     = gmdate('Ymd\THis\Z');
