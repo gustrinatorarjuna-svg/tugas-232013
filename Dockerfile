@@ -1,14 +1,17 @@
-FROM php:8.2-apache
+FROM php:8.2-cli
 
 # Install ekstensi mysqli
 RUN docker-php-ext-install mysqli
 
-# Copy semua file ke folder Apache
+# Copy semua file
 COPY . /var/www/html/
 
-# Beri izin folder upload
-RUN mkdir -p /var/www/html/thumbnail /var/www/html/video \
-    && chmod -R 755 /var/www/html/thumbnail \
-    && chmod -R 755 /var/www/html/video
+WORKDIR /var/www/html
 
-EXPOSE 80
+# Buat folder upload
+RUN mkdir -p thumbnail video \
+    && chmod -R 755 thumbnail video
+
+EXPOSE 8080
+
+CMD ["php", "-S", "0.0.0.0:8080"]
