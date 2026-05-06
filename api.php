@@ -151,7 +151,21 @@ switch ($action) {
         if (!move_uploaded_file($videoFile['tmp_name'], $videoPath)) {
             @unlink($thumbPath);
             http_response_code(500);
-            echo json_encode(['success' => false, 'message' => 'Gagal memindahkan video.']);
+            echo json_encode([
+                'success'   => false,
+                'message'   => 'Gagal memindahkan video.',
+                'debug'     => [
+                    'tmp_name'    => $videoFile['tmp_name'],
+                    'tmp_exists'  => file_exists($videoFile['tmp_name']),
+                    'tmp_size'    => filesize($videoFile['tmp_name'] ?: '/dev/null'),
+                    'video_dir'   => $videoDir,
+                    'dir_exists'  => is_dir($videoDir),
+                    'dir_writable'=> is_writable($videoDir),
+                    'video_path'  => $videoPath,
+                    'upload_err'  => $videoFile['error'],
+                    'php_tmp_dir' => ini_get('upload_tmp_dir') ?: sys_get_temp_dir(),
+                ],
+            ]);
             break;
         }
 
