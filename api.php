@@ -114,6 +114,11 @@ function uploadToR2(string $localPath, string $r2Key, string $contentType): bool
     $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
+    // Jika gagal, tulis pesan error dari R2 ke dalam error log PHP
+    if ($httpCode !== 200) {
+        error_log("R2 Upload Failed. HTTP Code: $httpCode, Response: $response");
+    }
+
     return $httpCode === 200;
 }
 
