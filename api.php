@@ -1,7 +1,7 @@
 <?php
 // ─────────────────────────────────────────────────────────────
 //  API Backend – tugas-232013
-//  Hosting: Railway
+//  Hosting: Railway + Cloudflare R2 Storage
 // ─────────────────────────────────────────────────────────────
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -14,32 +14,25 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
 
-// Preflight request (CORS)
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-// ── Konfigurasi Database (Railway) ───────────────────────────
-// Railway otomatis inject environment variable ke service.
-// Jika PHP di-deploy di Railway (project yang sama), gunakan internal host.
-// Jika PHP di-deploy di luar Railway, ganti MYSQLHOST dengan public host.
-
+// ── Konfigurasi Database ─────────────────────────────────────
 $db_host = getenv('MYSQLHOST')     ?: 'mysql.railway.internal';
 $db_name = getenv('MYSQLDATABASE') ?: 'railway';
-$db_port = (int)(getenv('MYSQLPORT')     ?: 3306);
+$db_port = (int)(getenv('MYSQLPORT') ?: 3306);
 $db_user = getenv('MYSQLUSER')     ?: 'root';
 $db_pass = getenv('MYSQLPASSWORD') ?: 'hITOWEbxOZmYvNiRUxneBBWfMXfOUkvp';
 
-// !! Jika PHP TIDAK di Railway (misal Koyeb, Render, dll),
-// ganti ke public host di bawah ini:
-// $db_host = 'trolley.proxy.rlwy.net';
-// $db_port = 49337;
-
-// ── Base URL aplikasi ─────────────────────────────────────────
-// Ganti dengan URL Railway service PHP kamu setelah deploy.
-// Contoh: https://tugas-232013-production.up.railway.app
-$baseUrl = getenv('BASE_URL') ?: 'https://tugas-232013-production.up.railway.app';
+// ── Konfigurasi Cloudflare R2 ────────────────────────────────
+$r2AccessKey  = getenv('R2_ACCESS_KEY_ID')     ?: '';
+$r2SecretKey  = getenv('R2_SECRET_ACCESS_KEY') ?: '';
+$r2BucketName = getenv('R2_BUCKET_NAME')       ?: '';
+$r2AccountId  = getenv('R2_ACCOUNT_ID')        ?: '';
+$r2PublicUrl  = rtrim(getenv('R2_PUBLIC_URL')  ?: '', '/');
+$r2Endpoint   = "https://{$r2AccountId}.r2.cloudflarestorage.com";
 
 // ── Koneksi Database ─────────────────────────────────────────
 $conn = new mysqli($db_host, $db_user, $db_pass, $db_name, $db_port);
@@ -47,11 +40,140 @@ $conn->set_charset('utf8mb4');
 
 if ($conn->connect_error) {
     http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Koneksi database gagal: ' . $conn->connect_error
-    ]);
+    echo json_encode(['success' => false, 'message' => 'Koneksi database gagal: ' . $conn->connect_error]);
     exit();
+}
+
+// ═════════════════════════════════════════════════════════════
+//  HELPER: Upload file ke Cloudflare R2 (AWS S3 Signature V4)
+// ═════════════════════════════════════════════════════════════
+function uploadToR2(string $localPath, string $r2Key, string $contentType): bool {
+    global $r2AccessKey, $r2SecretKey, $r2BucketName, $r2AccountId, $r2Endpoint;
+
+    $fileContent = file_get_contents($localPath);
+    if ($fileContent === false) return false;
+
+    $region      = 'auto';
+    $service     = 's3';
+    $host        = "{$r2AccountId}.r2.cloudflarestorage.com";
+    $amzDate     = gmdate('Ymd\THis\Z');
+    $dateStamp   = gmdate('Ymd');
+    $payloadHash = hash('sha256', $fileContent);
+
+    // Canonical request
+    $canonicalHeaders = "content-type:{$contentType}\nhost:{$host}\nx-amz-content-sha256:{$payloadHash}\nx-amz-date:{$amzDate}\n";
+    $signedHeaders    = 'content-type;host;x-amz-content-sha256;x-amz-date';
+    $canonicalRequest = implode("\n", [
+        'PUT',
+        "/{$r2BucketName}/{$r2Key}",
+        '',
+        $canonicalHeaders,
+        $signedHeaders,
+        $payloadHash,
+    ]);
+
+    // String to sign
+    $credentialScope = "{$dateStamp}/{$region}/{$service}/aws4_request";
+    $stringToSign    = implode("\n", [
+        'AWS4-HMAC-SHA256',
+        $amzDate,
+        $credentialScope,
+        hash('sha256', $canonicalRequest),
+    ]);
+
+    // Signing key
+    $signingKey = hash_hmac('sha256', 'aws4_request',
+        hash_hmac('sha256', $service,
+            hash_hmac('sha256', $region,
+                hash_hmac('sha256', $dateStamp, 'AWS4' . $r2SecretKey, true),
+            true),
+        true),
+    true);
+
+    $signature = hash_hmac('sha256', $stringToSign, $signingKey);
+
+    $authHeader = "AWS4-HMAC-SHA256 Credential={$r2AccessKey}/{$credentialScope}, SignedHeaders={$signedHeaders}, Signature={$signature}";
+
+    $url = "{$r2Endpoint}/{$r2BucketName}/{$r2Key}";
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST  => 'PUT',
+        CURLOPT_POSTFIELDS     => $fileContent,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => [
+            "Authorization: {$authHeader}",
+            "Content-Type: {$contentType}",
+            "x-amz-content-sha256: {$payloadHash}",
+            "x-amz-date: {$amzDate}",
+            "Content-Length: " . strlen($fileContent),
+        ],
+    ]);
+
+    $response   = curl_exec($ch);
+    $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return $httpCode === 200;
+}
+
+// ═════════════════════════════════════════════════════════════
+//  HELPER: Hapus file dari Cloudflare R2
+// ═════════════════════════════════════════════════════════════
+function deleteFromR2(string $r2Key): void {
+    global $r2AccessKey, $r2SecretKey, $r2BucketName, $r2AccountId, $r2Endpoint;
+
+    $region      = 'auto';
+    $service     = 's3';
+    $host        = "{$r2AccountId}.r2.cloudflarestorage.com";
+    $amzDate     = gmdate('Ymd\THis\Z');
+    $dateStamp   = gmdate('Ymd');
+    $payloadHash = hash('sha256', '');
+
+    $canonicalHeaders = "host:{$host}\nx-amz-content-sha256:{$payloadHash}\nx-amz-date:{$amzDate}\n";
+    $signedHeaders    = 'host;x-amz-content-sha256;x-amz-date';
+    $canonicalRequest = implode("\n", [
+        'DELETE',
+        "/{$r2BucketName}/{$r2Key}",
+        '',
+        $canonicalHeaders,
+        $signedHeaders,
+        $payloadHash,
+    ]);
+
+    $credentialScope = "{$dateStamp}/{$region}/{$service}/aws4_request";
+    $stringToSign    = implode("\n", [
+        'AWS4-HMAC-SHA256',
+        $amzDate,
+        $credentialScope,
+        hash('sha256', $canonicalRequest),
+    ]);
+
+    $signingKey = hash_hmac('sha256', 'aws4_request',
+        hash_hmac('sha256', $service,
+            hash_hmac('sha256', $region,
+                hash_hmac('sha256', $dateStamp, 'AWS4' . $r2SecretKey, true),
+            true),
+        true),
+    true);
+
+    $signature  = hash_hmac('sha256', $stringToSign, $signingKey);
+    $authHeader = "AWS4-HMAC-SHA256 Credential={$r2AccessKey}/{$credentialScope}, SignedHeaders={$signedHeaders}, Signature={$signature}";
+
+    $url = "{$r2Endpoint}/{$r2BucketName}/{$r2Key}";
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST  => 'DELETE',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => [
+            "Authorization: {$authHeader}",
+            "x-amz-content-sha256: {$payloadHash}",
+            "x-amz-date: {$amzDate}",
+        ],
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
 }
 
 // ── Routing berdasarkan ?action= ─────────────────────────────
@@ -59,7 +181,7 @@ $action = $_GET['action'] ?? '';
 
 switch ($action) {
 
-    // ── LIST: Ambil semua data ────────────────────────────────
+    // ── LIST ─────────────────────────────────────────────────
     case 'list':
         $result = $conn->query("SELECT * FROM youtube_232013 ORDER BY id DESC");
 
@@ -71,16 +193,12 @@ switch ($action) {
 
         $data = [];
         while ($row = $result->fetch_assoc()) {
-            // Konstruksi URL lengkap untuk thumbnail jika hanya berisi filename
-            if (!str_starts_with($row['thumbnail'], 'http')) {
-                $row['thumbnail'] = $baseUrl . '/thumbnail/' . $row['thumbnail'];
-            }
             $data[] = $row;
         }
         echo json_encode($data);
         break;
 
-    // ── ADD: Simpan data + upload thumbnail + video ───────────
+    // ── ADD ──────────────────────────────────────────────────
     case 'add':
         $title = trim($_POST['title'] ?? '');
 
@@ -90,7 +208,7 @@ switch ($action) {
             break;
         }
 
-        // Upload thumbnail
+        // Validasi thumbnail
         if (!isset($_FILES['thumbnail']) || $_FILES['thumbnail']['error'] !== UPLOAD_ERR_OK) {
             http_response_code(400);
             echo json_encode(['success' => false, 'message' => 'Upload thumbnail gagal.']);
@@ -103,27 +221,12 @@ switch ($action) {
 
         if (!in_array($thumbExt, $thumbAllowed)) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Format thumbnail tidak didukung. Gunakan jpg/png/webp/gif.']);
+            echo json_encode(['success' => false, 'message' => 'Format thumbnail tidak didukung.']);
             break;
         }
 
-        $thumbName = uniqid('thumb_', true) . '.' . $thumbExt;
-        $thumbDir  = __DIR__ . '/thumbnail/';
-        $thumbPath = $thumbDir . $thumbName;
-
-        if (!is_dir($thumbDir)) {
-            mkdir($thumbDir, 0755, true);
-        }
-
-        if (!move_uploaded_file($thumbFile['tmp_name'], $thumbPath)) {
-            http_response_code(500);
-            echo json_encode(['success' => false, 'message' => 'Gagal memindahkan thumbnail.']);
-            break;
-        }
-
-        // Upload video
+        // Validasi video
         if (!isset($_FILES['video']) || $_FILES['video']['error'] !== UPLOAD_ERR_OK) {
-            @unlink($thumbPath);
             http_response_code(400);
             echo json_encode(['success' => false, 'message' => 'Upload video gagal.']);
             break;
@@ -134,59 +237,51 @@ switch ($action) {
         $videoAllowed = ['mp4', 'webm', 'avi', 'mov', 'mkv', 'flv', 'wmv'];
 
         if (!in_array($videoExt, $videoAllowed)) {
-            @unlink($thumbPath);
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Format video tidak didukung. Gunakan mp4/webm/avi/mov/mkv.']);
+            echo json_encode(['success' => false, 'message' => 'Format video tidak didukung.']);
             break;
         }
 
-        $videoName = uniqid('video_', true) . '.' . $videoExt;
-        $videoDir  = __DIR__ . '/video/';
-        $videoPath = $videoDir . $videoName;
+        // Upload thumbnail ke R2
+        $thumbKey  = 'thumbnail/' . uniqid('thumb_', true) . '.' . $thumbExt;
+        $thumbMime = $thumbFile['type'] ?: 'image/jpeg';
 
-        if (!is_dir($videoDir)) {
-            mkdir($videoDir, 0755, true);
-        }
-
-        if (!move_uploaded_file($videoFile['tmp_name'], $videoPath)) {
-            @unlink($thumbPath);
+        if (!uploadToR2($thumbFile['tmp_name'], $thumbKey, $thumbMime)) {
             http_response_code(500);
-            echo json_encode([
-                'success'   => false,
-                'message'   => 'Gagal memindahkan video.',
-                'debug'     => [
-                    'tmp_name'    => $videoFile['tmp_name'],
-                    'tmp_exists'  => file_exists($videoFile['tmp_name']),
-                    'tmp_size'    => filesize($videoFile['tmp_name'] ?: '/dev/null'),
-                    'video_dir'   => $videoDir,
-                    'dir_exists'  => is_dir($videoDir),
-                    'dir_writable'=> is_writable($videoDir),
-                    'video_path'  => $videoPath,
-                    'upload_err'  => $videoFile['error'],
-                    'php_tmp_dir' => ini_get('upload_tmp_dir') ?: sys_get_temp_dir(),
-                ],
-            ]);
+            echo json_encode(['success' => false, 'message' => 'Gagal upload thumbnail ke R2.']);
             break;
         }
 
-        $videoUrl = $baseUrl . '/video/' . $videoName;
+        // Upload video ke R2
+        $videoKey  = 'video/' . uniqid('video_', true) . '.' . $videoExt;
+        $videoMime = $videoFile['type'] ?: 'video/mp4';
+
+        if (!uploadToR2($videoFile['tmp_name'], $videoKey, $videoMime)) {
+            deleteFromR2($thumbKey);
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'Gagal upload video ke R2.']);
+            break;
+        }
+
+        $thumbUrl = $r2PublicUrl . '/' . $thumbKey;
+        $videoUrl = $r2PublicUrl . '/' . $videoKey;
 
         $stmt = $conn->prepare(
             "INSERT INTO youtube_232013 (title, thumbnail, video) VALUES (?, ?, ?)"
         );
-        $stmt->bind_param('sss', $title, $thumbName, $videoUrl);
+        $stmt->bind_param('sss', $title, $thumbUrl, $videoUrl);
 
         if ($stmt->execute()) {
             echo json_encode([
                 'success'   => true,
                 'message'   => 'Data berhasil disimpan.',
                 'id'        => $conn->insert_id,
-                'thumbnail' => $baseUrl . '/thumbnail/' . $thumbName,
+                'thumbnail' => $thumbUrl,
                 'video'     => $videoUrl,
             ]);
         } else {
-            @unlink($thumbPath);
-            @unlink($videoPath);
+            deleteFromR2($thumbKey);
+            deleteFromR2($videoKey);
             http_response_code(500);
             echo json_encode(['success' => false, 'message' => 'Query gagal: ' . $stmt->error]);
         }
@@ -194,7 +289,7 @@ switch ($action) {
         $stmt->close();
         break;
 
-    // ── UPDATE: Update data ───────────────────────────────────
+    // ── UPDATE ───────────────────────────────────────────────
     case 'update':
         $id = intval($_GET['id'] ?? 0);
 
@@ -207,8 +302,7 @@ switch ($action) {
         $stmt = $conn->prepare("SELECT * FROM youtube_232013 WHERE id = ?");
         $stmt->bind_param('i', $id);
         $stmt->execute();
-        $result  = $stmt->get_result();
-        $oldData = $result->fetch_assoc();
+        $oldData = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
         if (!$oldData) {
@@ -218,15 +312,14 @@ switch ($action) {
         }
 
         $title = trim($_POST['title'] ?? '');
-
         if ($title === '') {
             http_response_code(400);
             echo json_encode(['success' => false, 'message' => 'Title wajib diisi.']);
             break;
         }
 
-        $thumbName = $oldData['thumbnail'];
-        $videoUrl  = $oldData['video'];
+        $thumbUrl = $oldData['thumbnail'];
+        $videoUrl = $oldData['video'];
 
         // Update thumbnail jika ada file baru
         if (isset($_FILES['thumbnail']) && $_FILES['thumbnail']['error'] === UPLOAD_ERR_OK) {
@@ -240,21 +333,21 @@ switch ($action) {
                 break;
             }
 
-            $newThumbName = uniqid('thumb_', true) . '.' . $thumbExt;
-            $thumbDir     = __DIR__ . '/thumbnail/';
-            $newThumbPath = $thumbDir . $newThumbName;
-            $oldThumbPath = $thumbDir . $oldData['thumbnail'];
+            $newThumbKey  = 'thumbnail/' . uniqid('thumb_', true) . '.' . $thumbExt;
+            $thumbMime    = $thumbFile['type'] ?: 'image/jpeg';
 
-            if (!is_dir($thumbDir)) mkdir($thumbDir, 0755, true);
-
-            if (!move_uploaded_file($thumbFile['tmp_name'], $newThumbPath)) {
+            if (!uploadToR2($thumbFile['tmp_name'], $newThumbKey, $thumbMime)) {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => 'Gagal memindahkan thumbnail baru.']);
+                echo json_encode(['success' => false, 'message' => 'Gagal upload thumbnail baru ke R2.']);
                 break;
             }
 
-            if (file_exists($oldThumbPath)) @unlink($oldThumbPath);
-            $thumbName = $newThumbName;
+            // Hapus thumbnail lama dari R2
+            $oldThumbKey = parse_url($oldData['thumbnail'], PHP_URL_PATH);
+            $oldThumbKey = ltrim($oldThumbKey, '/');
+            deleteFromR2($oldThumbKey);
+
+            $thumbUrl = $r2PublicUrl . '/' . $newThumbKey;
         }
 
         // Update video jika ada file baru
@@ -269,35 +362,30 @@ switch ($action) {
                 break;
             }
 
-            $newVideoName = uniqid('video_', true) . '.' . $videoExt;
-            $videoDir     = __DIR__ . '/video/';
-            $newVideoPath = $videoDir . $newVideoName;
+            $newVideoKey = 'video/' . uniqid('video_', true) . '.' . $videoExt;
+            $videoMime   = $videoFile['type'] ?: 'video/mp4';
 
-            if (!is_dir($videoDir)) mkdir($videoDir, 0755, true);
-
-            if (!move_uploaded_file($videoFile['tmp_name'], $newVideoPath)) {
+            if (!uploadToR2($videoFile['tmp_name'], $newVideoKey, $videoMime)) {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => 'Gagal memindahkan video baru.']);
+                echo json_encode(['success' => false, 'message' => 'Gagal upload video baru ke R2.']);
                 break;
             }
 
-            $oldVideoPath = $videoDir . basename($oldData['video']);
-            if (file_exists($oldVideoPath)) @unlink($oldVideoPath);
+            // Hapus video lama dari R2
+            $oldVideoKey = parse_url($oldData['video'], PHP_URL_PATH);
+            $oldVideoKey = ltrim($oldVideoKey, '/');
+            deleteFromR2($oldVideoKey);
 
-            $videoUrl = $baseUrl . '/video/' . $newVideoName;
+            $videoUrl = $r2PublicUrl . '/' . $newVideoKey;
         }
 
         $stmt = $conn->prepare(
             "UPDATE youtube_232013 SET title = ?, thumbnail = ?, video = ? WHERE id = ?"
         );
-        $stmt->bind_param('sssi', $title, $thumbName, $videoUrl, $id);
+        $stmt->bind_param('sssi', $title, $thumbUrl, $videoUrl, $id);
 
         if ($stmt->execute()) {
-            echo json_encode([
-                'success' => true,
-                'message' => 'Data berhasil diperbarui.',
-                'id'      => $id,
-            ]);
+            echo json_encode(['success' => true, 'message' => 'Data berhasil diperbarui.', 'id' => $id]);
         } else {
             http_response_code(500);
             echo json_encode(['success' => false, 'message' => 'Query gagal: ' . $stmt->error]);
@@ -306,7 +394,7 @@ switch ($action) {
         $stmt->close();
         break;
 
-    // ── DELETE: Hapus data + file ─────────────────────────────
+    // ── DELETE ───────────────────────────────────────────────
     case 'delete':
         $id = intval($_GET['id'] ?? 0);
 
@@ -319,8 +407,7 @@ switch ($action) {
         $stmt = $conn->prepare("SELECT thumbnail, video FROM youtube_232013 WHERE id = ?");
         $stmt->bind_param('i', $id);
         $stmt->execute();
-        $result = $stmt->get_result();
-        $data   = $result->fetch_assoc();
+        $data = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
         if (!$data) {
@@ -329,11 +416,11 @@ switch ($action) {
             break;
         }
 
-        $thumbPath = __DIR__ . '/thumbnail/' . $data['thumbnail'];
-        if (file_exists($thumbPath)) @unlink($thumbPath);
-
-        $videoPath = __DIR__ . '/video/' . basename($data['video']);
-        if (file_exists($videoPath)) @unlink($videoPath);
+        // Hapus file dari R2
+        $thumbKey = ltrim(parse_url($data['thumbnail'], PHP_URL_PATH), '/');
+        $videoKey = ltrim(parse_url($data['video'], PHP_URL_PATH), '/');
+        deleteFromR2($thumbKey);
+        deleteFromR2($videoKey);
 
         $stmt = $conn->prepare("DELETE FROM youtube_232013 WHERE id = ?");
         $stmt->bind_param('i', $id);
