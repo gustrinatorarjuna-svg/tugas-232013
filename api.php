@@ -5,6 +5,9 @@
 // ─────────────────────────────────────────────────────────────
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
+ini_set('upload_max_filesize', '50M');
+ini_set('post_max_size', '50M');
+ini_set('max_execution_time', '300');
 
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
