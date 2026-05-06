@@ -221,7 +221,8 @@ switch ($action) {
         // Validasi video
         if (!isset($_FILES['video']) || $_FILES['video']['error'] !== UPLOAD_ERR_OK) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => 'Upload video gagal.']);
+            $errCode = isset($_FILES['video']) ? $_FILES['video']['error'] : 'NULL';
+            echo json_encode(['success' => false, 'message' => 'Upload video gagal. Kode PHP: ' . $errCode]);
             break;
         }
 
