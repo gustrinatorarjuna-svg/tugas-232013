@@ -45,13 +45,18 @@ if ($conn->connect_error) {
 }
 
 // ═════════════════════════════════════════════════════════════
-//  HELPER: Upload file ke Cloudflare R2 (AWS S3 Signature V4)
+//  HELPER: Upload file ke Cloudflare R2 (VERSI DEBUGGING)
 // ═════════════════════════════════════════════════════════════
 function uploadToR2(string $localPath, string $r2Key, string $contentType): bool {
     global $r2AccessKey, $r2SecretKey, $r2BucketName, $r2AccountId, $r2Endpoint;
 
     $fileContent = file_get_contents($localPath);
-    if ($fileContent === false) return false;
+    if ($fileContent === false) {
+        // Error 1: PHP Railway gagal membaca file yang diupload Flutter
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'DEBUG ERROR: Gagal membaca file temporary di server Railway.']);
+        exit();
+    }
 
     $region      = 'auto';
     $service     = 's3';
@@ -60,38 +65,15 @@ function uploadToR2(string $localPath, string $r2Key, string $contentType): bool
     $dateStamp   = gmdate('Ymd');
     $payloadHash = hash('sha256', $fileContent);
 
-    // Canonical request
     $canonicalHeaders = "content-type:{$contentType}\nhost:{$host}\nx-amz-content-sha256:{$payloadHash}\nx-amz-date:{$amzDate}\n";
     $signedHeaders    = 'content-type;host;x-amz-content-sha256;x-amz-date';
-    $canonicalRequest = implode("\n", [
-        'PUT',
-        "/{$r2BucketName}/{$r2Key}",
-        '',
-        $canonicalHeaders,
-        $signedHeaders,
-        $payloadHash,
-    ]);
+    $canonicalRequest = implode("\n", ['PUT', "/{$r2BucketName}/{$r2Key}", '', $canonicalHeaders, $signedHeaders, $payloadHash]);
 
-    // String to sign
     $credentialScope = "{$dateStamp}/{$region}/{$service}/aws4_request";
-    $stringToSign    = implode("\n", [
-        'AWS4-HMAC-SHA256',
-        $amzDate,
-        $credentialScope,
-        hash('sha256', $canonicalRequest),
-    ]);
+    $stringToSign    = implode("\n", ['AWS4-HMAC-SHA256', $amzDate, $credentialScope, hash('sha256', $canonicalRequest)]);
 
-    // Signing key
-    $signingKey = hash_hmac('sha256', 'aws4_request',
-        hash_hmac('sha256', $service,
-            hash_hmac('sha256', $region,
-                hash_hmac('sha256', $dateStamp, 'AWS4' . $r2SecretKey, true),
-            true),
-        true),
-    true);
-
+    $signingKey = hash_hmac('sha256', 'aws4_request', hash_hmac('sha256', $service, hash_hmac('sha256', $region, hash_hmac('sha256', $dateStamp, 'AWS4' . $r2SecretKey, true), true), true), true);
     $signature = hash_hmac('sha256', $stringToSign, $signingKey);
-
     $authHeader = "AWS4-HMAC-SHA256 Credential={$r2AccessKey}/{$credentialScope}, SignedHeaders={$signedHeaders}, Signature={$signature}";
 
     $url = "{$r2Endpoint}/{$r2BucketName}/{$r2Key}";
@@ -112,14 +94,20 @@ function uploadToR2(string $localPath, string $r2Key, string $contentType): bool
 
     $response   = curl_exec($ch);
     $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError  = curl_error($ch);
     curl_close($ch);
 
-    // Jika gagal, tulis pesan error dari R2 ke dalam error log PHP
     if ($httpCode !== 200) {
-        error_log("R2 Upload Failed. HTTP Code: $httpCode, Response: $response");
+        // Error 2: R2 menolak upload. Kita paksa print response aslinya!
+        http_response_code(500);
+        echo json_encode([
+            'success' => false, 
+            'message' => "DEBUG R2 (HTTP $httpCode): " . ($response ?: $curlError)
+        ]);
+        exit();
     }
 
-    return $httpCode === 200;
+    return true;
 }
 
 // ═════════════════════════════════════════════════════════════
